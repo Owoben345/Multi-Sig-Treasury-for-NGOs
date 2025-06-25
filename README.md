@@ -38,7 +38,7 @@ Only the contract owner can add authorized donors:
 
 ### 2. 💸 Making Donations
 
-Authorized donors can contribute STX to the treasury:
+⚠️ **Important**: The donate function transfers the donor's **entire STX balance** to the treasury:
 
 ```clarity
 (contract-call? .multi-sig donate)
@@ -84,14 +84,37 @@ Anyone can execute proposals that meet approval threshold:
 (contract-call? .multi-sig get-treasury-balance)
 ```
 
+### Get Total Treasury Amount
+```clarity
+(contract-call? .multi-sig get-total-treasury)
+```
+
 ### Get Donor Information
 ```clarity
 (contract-call? .multi-sig get-donor-info 'ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM)
 ```
 
+### Get Vote Details
+```clarity
+(contract-call? .multi-sig get-vote u1 'ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM)
+```
+
 ### Check Proposal Status
 ```clarity
 (contract-call? .multi-sig get-proposal-status u1)
+```
+
+### Check if Proposal is Approved
+```clarity
+(contract-call? .multi-sig is-proposal-approved u1)
+```
+
+### Get Contract Information
+```clarity
+(contract-call? .multi-sig get-contract-owner)
+(contract-call? .multi-sig get-proposal-counter)
+(contract-call? .multi-sig get-donor-count)
+(contract-call? .multi-sig get-min-approval-percentage)
 ```
 
 ## ⚙️ Configuration
@@ -121,6 +144,7 @@ clarinet test
 - **Voting Power**: Weighted by donation amount
 - **Approval Threshold**: Configurable percentage (default: 60%)
 - **Time Limits**: 1440 blocks (~10 days) for voting
+- **Donor Limit**: Maximum 10 donors (hardcoded in voting power calculation)
 
 ## 🔐 Security Features
 
@@ -130,6 +154,8 @@ clarinet test
 - ✅ Proposal expiration handling
 - ✅ Balance validation before execution
 - ✅ Approval threshold enforcement
+- ✅ Active donor validation
+- ✅ Principal format validation for recipients
 
 ## 📊 Error Codes
 
@@ -145,6 +171,15 @@ clarinet test
 | u107 | Invalid amount |
 | u108 | Donor already exists |
 | u109 | Donor not found |
+| u110 | Invalid state |
+
+## ⚠️ Important Notes
+
+- **Donation Mechanism**: The `donate` function transfers the caller's entire STX balance
+- **Voting Power**: Based on cumulative donation amounts
+- **Proposal Expiration**: Automatically expires after 1440 blocks
+- **Donor Limit**: System supports maximum 10 donors due to fold implementation
+- **Block Height**: Uses `stacks-block-height` for timing mechanisms
 
 ## 🤝 Contributing
 
@@ -171,6 +206,4 @@ For questions and support, please open an issue on GitHub or contact the develop
 ---
 
 **Donoflow** - Empowering NGOs with transparent, decentralized treasury management 🌍
-```
-
 
