@@ -51,6 +51,17 @@
 (define-map donor-list uint principal)
 (define-data-var donor-count uint u0)
 
+(define-map donation-history uint
+  {
+    donor: principal,
+    amount: uint,
+    timestamp: uint,
+    block-height: uint
+  }
+)
+
+(define-data-var donation-counter uint u0)
+
 (define-public (add-donor (donor principal))
   (begin
     (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
@@ -70,6 +81,7 @@
   (let (
     (amount (stx-get-balance tx-sender))
     (donor-data (map-get? donors tx-sender))
+    (donation-id (+ (var-get donation-counter) u1))
   )
     (asserts! (> amount u0) ERR-INVALID-AMOUNT)
     (asserts! (is-some donor-data) ERR-DONOR-NOT-FOUND)
@@ -77,6 +89,13 @@
     (map-set donors tx-sender (merge (unwrap-panic donor-data) {
       donation-amount: (+ (get donation-amount (unwrap-panic donor-data)) amount)
     }))
+    (map-set donation-history donation-id {
+      donor: tx-sender,
+      amount: amount,
+      timestamp: burn-block-height,
+      block-height: stacks-block-height
+    })
+    (var-set donation-counter donation-id)
     (var-set total-treasury (+ (var-get total-treasury) amount))
     (ok amount)
   )
@@ -218,6 +237,31 @@
 
 (define-read-only (get-donor-count)
   (var-get donor-count)
+)
+
+(define-read-only (get-donation-history (donation-id uint))
+  (map-get? donation-history donation-id)
+)
+
+(define-read-only (get-donation-counter)
+  (var-get donation-counter)
+)
+
+(define-read-only (get-donor-donations (donor principal))
+  (fold filter-donor-donations (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10 u11 u12 u13 u14 u15 u16 u17 u18 u19 u20) (list))
+)
+
+(define-private (filter-donor-donations (donation-id uint) (result (list 20 uint)))
+  (if (<= donation-id (var-get donation-counter))
+    (match (map-get? donation-history donation-id)
+      donation-record (if (is-eq (get donor donation-record) tx-sender)
+        (unwrap-panic (as-max-len? (append result donation-id) u20))
+        result
+      )
+      result
+    )
+    result
+  )
 )
 
 (define-read-only (is-proposal-approved (proposal-id uint))
