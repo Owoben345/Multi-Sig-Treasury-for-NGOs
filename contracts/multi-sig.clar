@@ -10,6 +10,7 @@
 (define-constant ERR-DONOR-NOT-FOUND (err u109))
 (define-constant ERR-INVALID-STATE (err u110))
 (define-constant ERR-EMERGENCY-ACTIVE (err u111))
+(define-constant ERR-MILESTONE-NOT-FOUND (err u112))
 
 (define-data-var contract-owner principal tx-sender)
 (define-data-var proposal-counter uint u0)
@@ -17,12 +18,15 @@
 (define-data-var min-approval-percentage uint u60)
 (define-data-var emergency-mode bool false)
 (define-data-var emergency-withdrawal-count uint u0)
+(define-data-var milestone-achievement-counter uint u0)
 
 (define-map donors principal 
   {
     donation-amount: uint,
     is-active: bool,
-    joined-at: uint
+    joined-at: uint,
+    current-milestone-tier: uint,
+    total-milestones-achieved: uint
   }
 )
 
@@ -74,6 +78,24 @@
   }
 )
 
+(define-map milestone-tiers uint
+  {
+    threshold: uint,
+    voting-multiplier: uint,
+    tier-name: (string-ascii 50)
+  }
+)
+
+(define-map milestone-achievements uint
+  {
+    donor: principal,
+    tier-achieved: uint,
+    achieved-at: uint,
+    block-height: uint,
+    donation-amount-at-achievement: uint
+  }
+)
+
 (define-public (add-donor (donor principal))
   (begin
     (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
@@ -81,7 +103,9 @@
     (map-set donors donor {
       donation-amount: u0,
       is-active: true,
-      joined-at: stacks-block-height
+      joined-at: stacks-block-height,
+      current-milestone-tier: u0,
+      total-milestones-achieved: u0
     })
     (map-set donor-list (var-get donor-count) donor)
     (var-set donor-count (+ (var-get donor-count) u1))
@@ -98,9 +122,33 @@
     (asserts! (> amount u0) ERR-INVALID-AMOUNT)
     (asserts! (is-some donor-data) ERR-DONOR-NOT-FOUND)
     (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
-    (map-set donors tx-sender (merge (unwrap-panic donor-data) {
-      donation-amount: (+ (get donation-amount (unwrap-panic donor-data)) amount)
-    }))
+    (let (
+      (updated-amount (+ (get donation-amount (unwrap-panic donor-data)) amount))
+      (new-tier (get-milestone-tier-for-amount updated-amount))
+      (current-tier (get current-milestone-tier (unwrap-panic donor-data)))
+    )
+      (map-set donors tx-sender (merge (unwrap-panic donor-data) {
+        donation-amount: updated-amount,
+        current-milestone-tier: new-tier,
+        total-milestones-achieved: (if (> new-tier current-tier)
+          (+ (get total-milestones-achieved (unwrap-panic donor-data)) u1)
+          (get total-milestones-achieved (unwrap-panic donor-data))
+        )
+      }))
+      (if (> new-tier current-tier)
+        (begin
+          (var-set milestone-achievement-counter (+ (var-get milestone-achievement-counter) u1))
+          (map-set milestone-achievements (var-get milestone-achievement-counter) {
+            donor: tx-sender,
+            tier-achieved: new-tier,
+            achieved-at: burn-block-height,
+            block-height: stacks-block-height,
+            donation-amount-at-achievement: updated-amount
+          })
+        )
+        true
+      )
+    )
     (map-set donation-history donation-id {
       donor: tx-sender,
       amount: amount,
@@ -149,7 +197,10 @@
   (let (
     (proposal (unwrap! (map-get? proposals proposal-id) ERR-PROPOSAL-NOT-FOUND))
     (donor-data (unwrap! (map-get? donors tx-sender) ERR-DONOR-NOT-FOUND))
-    (voting-power (get donation-amount donor-data))
+    (base-voting-power (get donation-amount donor-data))
+    (milestone-tier (get current-milestone-tier donor-data))
+    (voting-multiplier (get-voting-multiplier milestone-tier))
+    (voting-power (/ (* base-voting-power voting-multiplier) u100))
     (vote-key {proposal-id: proposal-id, voter: tx-sender})
   )
     (asserts! (not (var-get emergency-mode)) ERR-EMERGENCY-ACTIVE)
@@ -211,8 +262,10 @@
     (asserts! (get is-active donor-data) ERR-INVALID-STATE)
     (map-set donors donor {
       donation-amount: (get donation-amount donor-data),
-      is-active: false,  ;; Explicit field assignment instead of merge
-      joined-at: (get joined-at donor-data)
+      is-active: false,
+      joined-at: (get joined-at donor-data),
+      current-milestone-tier: (get current-milestone-tier donor-data),
+      total-milestones-achieved: (get total-milestones-achieved donor-data)
     })
     (ok true)
   )
@@ -274,6 +327,18 @@
   (map-get? emergency-withdrawals withdrawal-id)
 )
 
+(define-read-only (get-milestone-achievement-counter)
+  (var-get milestone-achievement-counter)
+)
+
+(define-read-only (get-milestone-tier (tier-id uint))
+  (map-get? milestone-tiers tier-id)
+)
+
+(define-read-only (get-milestone-achievement (achievement-id uint))
+  (map-get? milestone-achievements achievement-id)
+)
+
 (define-read-only (get-donor-donations (donor principal))
   (fold filter-donor-donations (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10 u11 u12 u13 u14 u15 u16 u17 u18 u19 u20) (list))
 )
@@ -311,7 +376,13 @@
     (match (map-get? donor-list index)
       donor (match (map-get? donors donor)
         donor-data (if (get is-active donor-data)
-          (+ total (get donation-amount donor-data))
+          (let (
+            (base-amount (get donation-amount donor-data))
+            (milestone-tier (get current-milestone-tier donor-data))
+            (voting-multiplier (get-voting-multiplier milestone-tier))
+          )
+            (+ total (/ (* base-amount voting-multiplier) u100))
+          )
           total
         )
         total
@@ -371,5 +442,49 @@
     (var-set total-treasury (- (var-get total-treasury) amount))
     (var-set emergency-mode false)
     (ok withdrawal-id)
+  )
+)
+
+(define-public (initialize-milestone-tiers)
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+    (map-set milestone-tiers u1 {
+      threshold: u1000000,
+      voting-multiplier: u110,
+      tier-name: "Bronze Supporter"
+    })
+    (map-set milestone-tiers u2 {
+      threshold: u5000000,
+      voting-multiplier: u125,
+      tier-name: "Silver Guardian"
+    })
+    (map-set milestone-tiers u3 {
+      threshold: u10000000,
+      voting-multiplier: u150,
+      tier-name: "Gold Champion"
+    })
+    (map-set milestone-tiers u4 {
+      threshold: u25000000,
+      voting-multiplier: u200,
+      tier-name: "Platinum Benefactor"
+    })
+    (ok true)
+  )
+)
+
+(define-private (get-milestone-tier-for-amount (amount uint))
+  (if (>= amount u25000000) u4
+    (if (>= amount u10000000) u3
+      (if (>= amount u5000000) u2
+        (if (>= amount u1000000) u1 u0)
+      )
+    )
+  )
+)
+
+(define-private (get-voting-multiplier (tier uint))
+  (match (map-get? milestone-tiers tier)
+    tier-data (get voting-multiplier tier-data)
+    u100
   )
 )
