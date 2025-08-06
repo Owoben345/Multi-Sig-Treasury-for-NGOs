@@ -9,11 +9,14 @@
 (define-constant ERR-DONOR-EXISTS (err u108))
 (define-constant ERR-DONOR-NOT-FOUND (err u109))
 (define-constant ERR-INVALID-STATE (err u110))
+(define-constant ERR-EMERGENCY-ACTIVE (err u111))
 
 (define-data-var contract-owner principal tx-sender)
 (define-data-var proposal-counter uint u0)
 (define-data-var total-treasury uint u0)
 (define-data-var min-approval-percentage uint u60)
+(define-data-var emergency-mode bool false)
+(define-data-var emergency-withdrawal-count uint u0)
 
 (define-map donors principal 
   {
@@ -62,6 +65,15 @@
 
 (define-data-var donation-counter uint u0)
 
+(define-map emergency-withdrawals uint
+  {
+    amount: uint,
+    withdrawn-at: uint,
+    block-height: uint,
+    reason: (string-ascii 200)
+  }
+)
+
 (define-public (add-donor (donor principal))
   (begin
     (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
@@ -106,12 +118,13 @@
     (proposal-id (+ (var-get proposal-counter) u1))
     (donor-data (map-get? donors tx-sender))
   )
+    (asserts! (not (var-get emergency-mode)) ERR-EMERGENCY-ACTIVE)
     (asserts! (is-some donor-data) ERR-DONOR-NOT-FOUND)
     (asserts! (> amount u0) ERR-INVALID-AMOUNT)
     (asserts! (<= amount (var-get total-treasury)) ERR-INSUFFICIENT-FUNDS)
     (asserts! (> (len title) u0) ERR-INVALID-PROPOSAL)
     (asserts! (> (len description) u0) ERR-INVALID-PROPOSAL)
-    (asserts! (is-standard recipient) ERR-INVALID-PROPOSAL) ;; Validate principal format
+    (asserts! (is-standard recipient) ERR-INVALID-PROPOSAL)
     (map-set proposals proposal-id {
       title: title,
       description: description,
@@ -139,6 +152,7 @@
     (voting-power (get donation-amount donor-data))
     (vote-key {proposal-id: proposal-id, voter: tx-sender})
   )
+    (asserts! (not (var-get emergency-mode)) ERR-EMERGENCY-ACTIVE)
     (asserts! (get is-active proposal) ERR-INVALID-PROPOSAL)
     (asserts! (< stacks-block-height (get expires-at proposal)) ERR-PROPOSAL-EXPIRED)
     (asserts! (is-none (map-get? proposal-votes vote-key)) ERR-ALREADY-VOTED)
@@ -165,6 +179,7 @@
     (proposal (unwrap! (map-get? proposals proposal-id) ERR-PROPOSAL-NOT-FOUND))
     (approval-threshold (/ (* (get total-voting-power proposal) (var-get min-approval-percentage)) u100))
   )
+    (asserts! (not (var-get emergency-mode)) ERR-EMERGENCY-ACTIVE)
     (asserts! (get is-active proposal) ERR-INVALID-PROPOSAL)
     (asserts! (not (get is-executed proposal)) ERR-INVALID-PROPOSAL)
     (asserts! (>= (get yes-votes proposal) approval-threshold) ERR-PROPOSAL-NOT-APPROVED)
@@ -247,6 +262,18 @@
   (var-get donation-counter)
 )
 
+(define-read-only (get-emergency-mode)
+  (var-get emergency-mode)
+)
+
+(define-read-only (get-emergency-withdrawal-count)
+  (var-get emergency-withdrawal-count)
+)
+
+(define-read-only (get-emergency-withdrawal (withdrawal-id uint))
+  (map-get? emergency-withdrawals withdrawal-id)
+)
+
 (define-read-only (get-donor-donations (donor principal))
   (fold filter-donor-donations (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10 u11 u12 u13 u14 u15 u16 u17 u18 u19 u20) (list))
 )
@@ -312,5 +339,37 @@
       })
     )
     ERR-PROPOSAL-NOT-FOUND
+  )
+)
+
+(define-public (toggle-emergency-mode (enable bool))
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+    (var-set emergency-mode enable)
+    (ok enable)
+  )
+)
+
+(define-public (emergency-withdraw (amount uint) (reason (string-ascii 200)))
+  (let (
+    (withdrawal-id (+ (var-get emergency-withdrawal-count) u1))
+    (contract-balance (stx-get-balance (as-contract tx-sender)))
+  )
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+    (asserts! (var-get emergency-mode) ERR-INVALID-STATE)
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    (asserts! (<= amount contract-balance) ERR-INSUFFICIENT-FUNDS)
+    (asserts! (> (len reason) u0) ERR-INVALID-PROPOSAL)
+    (try! (as-contract (stx-transfer? amount tx-sender (var-get contract-owner))))
+    (map-set emergency-withdrawals withdrawal-id {
+      amount: amount,
+      withdrawn-at: burn-block-height,
+      block-height: stacks-block-height,
+      reason: reason
+    })
+    (var-set emergency-withdrawal-count withdrawal-id)
+    (var-set total-treasury (- (var-get total-treasury) amount))
+    (var-set emergency-mode false)
+    (ok withdrawal-id)
   )
 )
