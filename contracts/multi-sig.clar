@@ -11,6 +11,7 @@
 (define-constant ERR-INVALID-STATE (err u110))
 (define-constant ERR-EMERGENCY-ACTIVE (err u111))
 (define-constant ERR-MILESTONE-NOT-FOUND (err u112))
+(define-constant ERR-SPENDING-LIMIT-EXCEEDED (err u113))
 
 (define-data-var contract-owner principal tx-sender)
 (define-data-var proposal-counter uint u0)
@@ -19,6 +20,12 @@
 (define-data-var emergency-mode bool false)
 (define-data-var emergency-withdrawal-count uint u0)
 (define-data-var milestone-achievement-counter uint u0)
+(define-data-var daily-spending-limit-percent uint u10)
+(define-data-var weekly-spending-limit-percent uint u25)
+(define-data-var current-day-start uint u0)
+(define-data-var current-week-start uint u0)
+(define-data-var daily-spent uint u0)
+(define-data-var weekly-spent uint u0)
 
 (define-map donors principal 
   {
@@ -229,18 +236,21 @@
   (let (
     (proposal (unwrap! (map-get? proposals proposal-id) ERR-PROPOSAL-NOT-FOUND))
     (approval-threshold (/ (* (get total-voting-power proposal) (var-get min-approval-percentage)) u100))
+    (amount (get amount proposal))
   )
     (asserts! (not (var-get emergency-mode)) ERR-EMERGENCY-ACTIVE)
     (asserts! (get is-active proposal) ERR-INVALID-PROPOSAL)
     (asserts! (not (get is-executed proposal)) ERR-INVALID-PROPOSAL)
     (asserts! (>= (get yes-votes proposal) approval-threshold) ERR-PROPOSAL-NOT-APPROVED)
-    (asserts! (<= (get amount proposal) (stx-get-balance (as-contract tx-sender))) ERR-INSUFFICIENT-FUNDS)
-    (try! (as-contract (stx-transfer? (get amount proposal) tx-sender (get recipient proposal))))
+    (asserts! (<= amount (stx-get-balance (as-contract tx-sender))) ERR-INSUFFICIENT-FUNDS)
+    (try! (check-spending-limits amount))
+    (try! (as-contract (stx-transfer? amount tx-sender (get recipient proposal))))
+    (update-spending-tracking amount)
     (map-set proposals proposal-id (merge proposal {
       is-executed: true,
       is-active: false
     }))
-    (var-set total-treasury (- (var-get total-treasury) (get amount proposal)))
+    (var-set total-treasury (- (var-get total-treasury) amount))
     (ok true)
   )
 )
@@ -487,4 +497,92 @@
     tier-data (get voting-multiplier tier-data)
     u100
   )
+)
+
+(define-public (set-spending-limits (daily-percent uint) (weekly-percent uint))
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+    (asserts! (and (> daily-percent u0) (<= daily-percent u100)) ERR-INVALID-AMOUNT)
+    (asserts! (and (> weekly-percent u0) (<= weekly-percent u100)) ERR-INVALID-AMOUNT)
+    (asserts! (<= daily-percent weekly-percent) ERR-INVALID-AMOUNT)
+    (var-set daily-spending-limit-percent daily-percent)
+    (var-set weekly-spending-limit-percent weekly-percent)
+    (ok true)
+  )
+)
+
+(define-private (check-spending-limits (amount uint))
+  (let (
+    (current-block stacks-block-height)
+    (day-blocks u144)
+    (week-blocks u1008)
+    (treasury-balance (var-get total-treasury))
+    (daily-limit (/ (* treasury-balance (var-get daily-spending-limit-percent)) u100))
+    (weekly-limit (/ (* treasury-balance (var-get weekly-spending-limit-percent)) u100))
+  )
+    (begin
+      (update-spending-periods current-block day-blocks week-blocks)
+      (asserts! (<= (+ (var-get daily-spent) amount) daily-limit) ERR-SPENDING-LIMIT-EXCEEDED)
+      (asserts! (<= (+ (var-get weekly-spent) amount) weekly-limit) ERR-SPENDING-LIMIT-EXCEEDED)
+      (ok true)
+    )
+  )
+)
+
+(define-private (update-spending-periods (current-block uint) (day-blocks uint) (week-blocks uint))
+  (let (
+    (day-start-block (var-get current-day-start))
+    (week-start-block (var-get current-week-start))
+  )
+    (begin
+      (if (or (is-eq day-start-block u0) (>= current-block (+ day-start-block day-blocks)))
+        (begin
+          (var-set current-day-start current-block)
+          (var-set daily-spent u0)
+        )
+        true
+      )
+      (if (or (is-eq week-start-block u0) (>= current-block (+ week-start-block week-blocks)))
+        (begin
+          (var-set current-week-start current-block)
+          (var-set weekly-spent u0)
+        )
+        true
+      )
+    )
+  )
+)
+
+(define-private (update-spending-tracking (amount uint))
+  (begin
+    (var-set daily-spent (+ (var-get daily-spent) amount))
+    (var-set weekly-spent (+ (var-get weekly-spent) amount))
+  )
+)
+
+(define-read-only (get-spending-limits)
+  {
+    daily-limit-percent: (var-get daily-spending-limit-percent),
+    weekly-limit-percent: (var-get weekly-spending-limit-percent),
+    daily-limit-amount: (/ (* (var-get total-treasury) (var-get daily-spending-limit-percent)) u100),
+    weekly-limit-amount: (/ (* (var-get total-treasury) (var-get weekly-spending-limit-percent)) u100)
+  }
+)
+
+(define-read-only (get-current-spending)
+  {
+    daily-spent: (var-get daily-spent),
+    weekly-spent: (var-get weekly-spent),
+    daily-remaining: (- (/ (* (var-get total-treasury) (var-get daily-spending-limit-percent)) u100) (var-get daily-spent)),
+    weekly-remaining: (- (/ (* (var-get total-treasury) (var-get weekly-spending-limit-percent)) u100) (var-get weekly-spent))
+  }
+)
+
+(define-read-only (get-spending-periods)
+  {
+    current-day-start: (var-get current-day-start),
+    current-week-start: (var-get current-week-start),
+    day-blocks-remaining: (- (+ (var-get current-day-start) u144) stacks-block-height),
+    week-blocks-remaining: (- (+ (var-get current-week-start) u1008) stacks-block-height)
+  }
 )
