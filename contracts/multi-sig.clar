@@ -12,6 +12,10 @@
 (define-constant ERR-EMERGENCY-ACTIVE (err u111))
 (define-constant ERR-MILESTONE-NOT-FOUND (err u112))
 (define-constant ERR-SPENDING-LIMIT-EXCEEDED (err u113))
+(define-constant ERR-ALREADY-DELEGATED (err u114))
+(define-constant ERR-NOT-DELEGATED (err u115))
+(define-constant ERR-SELF-DELEGATION (err u116))
+(define-constant ERR-DELEGATION-NOT-FOUND (err u117))
 
 (define-data-var contract-owner principal tx-sender)
 (define-data-var proposal-counter uint u0)
@@ -26,6 +30,7 @@
 (define-data-var current-week-start uint u0)
 (define-data-var daily-spent uint u0)
 (define-data-var weekly-spent uint u0)
+(define-data-var delegation-counter uint u0)
 
 (define-map donors principal 
   {
@@ -102,6 +107,25 @@
     donation-amount-at-achievement: uint
   }
 )
+
+(define-map delegations principal
+  {
+    delegate-to: principal,
+    delegated-at: uint,
+    is-active: bool
+  }
+)
+
+(define-map delegation-history uint
+  {
+    delegator: principal,
+    delegate: principal,
+    delegated-at: uint,
+    revoked-at: (optional uint),
+    is-active: bool
+  }
+)
+
 
 (define-public (add-donor (donor principal))
   (begin
@@ -204,6 +228,7 @@
   (let (
     (proposal (unwrap! (map-get? proposals proposal-id) ERR-PROPOSAL-NOT-FOUND))
     (donor-data (unwrap! (map-get? donors tx-sender) ERR-DONOR-NOT-FOUND))
+    (delegation (map-get? delegations tx-sender))
     (base-voting-power (get donation-amount donor-data))
     (milestone-tier (get current-milestone-tier donor-data))
     (voting-multiplier (get-voting-multiplier milestone-tier))
@@ -215,6 +240,7 @@
     (asserts! (< stacks-block-height (get expires-at proposal)) ERR-PROPOSAL-EXPIRED)
     (asserts! (is-none (map-get? proposal-votes vote-key)) ERR-ALREADY-VOTED)
     (asserts! (> voting-power u0) ERR-NOT-AUTHORIZED)
+    (asserts! (or (is-none delegation) (not (get is-active (unwrap-panic delegation)))) ERR-ALREADY-DELEGATED)
     (map-set proposal-votes vote-key {
       vote: vote,
       voting-power: voting-power,
@@ -586,3 +612,173 @@
     week-blocks-remaining: (- (+ (var-get current-week-start) u1008) stacks-block-height)
   }
 )
+
+(define-public (delegate-voting-power (delegate principal))
+  (let (
+    (delegator-data (unwrap! (map-get? donors tx-sender) ERR-DONOR-NOT-FOUND))
+    (delegate-data (unwrap! (map-get? donors delegate) ERR-DONOR-NOT-FOUND))
+    (existing-delegation (map-get? delegations tx-sender))
+    (delegation-id (+ (var-get delegation-counter) u1))
+  )
+    (asserts! (not (var-get emergency-mode)) ERR-EMERGENCY-ACTIVE)
+    (asserts! (not (is-eq tx-sender delegate)) ERR-SELF-DELEGATION)
+    (asserts! (get is-active delegator-data) ERR-INVALID-STATE)
+    (asserts! (get is-active delegate-data) ERR-INVALID-STATE)
+    (asserts! (or (is-none existing-delegation) (not (get is-active (unwrap-panic existing-delegation)))) ERR-ALREADY-DELEGATED)
+    (map-set delegations tx-sender {
+      delegate-to: delegate,
+      delegated-at: stacks-block-height,
+      is-active: true
+    })
+    (map-set delegation-history delegation-id {
+      delegator: tx-sender,
+      delegate: delegate,
+      delegated-at: stacks-block-height,
+      revoked-at: none,
+      is-active: true
+    })
+    (var-set delegation-counter delegation-id)
+    (ok delegation-id)
+  )
+)
+
+(define-public (revoke-delegation)
+  (let (
+    (delegator-data (unwrap! (map-get? donors tx-sender) ERR-DONOR-NOT-FOUND))
+    (delegation (unwrap! (map-get? delegations tx-sender) ERR-NOT-DELEGATED))
+  )
+    (asserts! (get is-active delegation) ERR-NOT-DELEGATED)
+    (map-set delegations tx-sender {
+      delegate-to: (get delegate-to delegation),
+      delegated-at: (get delegated-at delegation),
+      is-active: false
+    })
+    (update-delegation-history-on-revoke tx-sender)
+    (ok true)
+  )
+)
+
+(define-private (update-delegation-history-on-revoke (delegator principal))
+  (let (
+    (counter (var-get delegation-counter))
+  )
+    (fold update-history-entry (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10 u11 u12 u13 u14 u15 u16 u17 u18 u19 u20) delegator)
+  )
+)
+
+(define-private (update-history-entry (id uint) (delegator principal))
+  (if (<= id (var-get delegation-counter))
+    (match (map-get? delegation-history id)
+      history-entry
+        (if (and (is-eq (get delegator history-entry) delegator) (get is-active history-entry))
+          (begin
+            (map-set delegation-history id (merge history-entry {
+              revoked-at: (some stacks-block-height),
+              is-active: false
+            }))
+            delegator
+          )
+          delegator
+        )
+      delegator
+    )
+    delegator
+  )
+)
+
+(define-public (vote-as-delegate (proposal-id uint) (vote bool) (delegators (list 20 principal)))
+  (let (
+    (proposal (unwrap! (map-get? proposals proposal-id) ERR-PROPOSAL-NOT-FOUND))
+    (delegate-data (unwrap! (map-get? donors tx-sender) ERR-DONOR-NOT-FOUND))
+    (base-voting-power (get donation-amount delegate-data))
+    (milestone-tier (get current-milestone-tier delegate-data))
+    (voting-multiplier (get-voting-multiplier milestone-tier))
+    (own-voting-power (/ (* base-voting-power voting-multiplier) u100))
+    (vote-key {proposal-id: proposal-id, voter: tx-sender})
+    (delegated-power (calculate-delegated-power delegators tx-sender))
+    (total-voting-power (+ own-voting-power delegated-power))
+  )
+    (asserts! (not (var-get emergency-mode)) ERR-EMERGENCY-ACTIVE)
+    (asserts! (get is-active proposal) ERR-INVALID-PROPOSAL)
+    (asserts! (< stacks-block-height (get expires-at proposal)) ERR-PROPOSAL-EXPIRED)
+    (asserts! (is-none (map-get? proposal-votes vote-key)) ERR-ALREADY-VOTED)
+    (asserts! (> total-voting-power u0) ERR-NOT-AUTHORIZED)
+    (map-set proposal-votes vote-key {
+      vote: vote,
+      voting-power: total-voting-power,
+      voted-at: stacks-block-height
+    })
+    (if vote
+      (map-set proposals proposal-id (merge proposal {
+        yes-votes: (+ (get yes-votes proposal) total-voting-power)
+      }))
+      (map-set proposals proposal-id (merge proposal {
+        no-votes: (+ (get no-votes proposal) total-voting-power)
+      }))
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-delegation (delegator principal))
+  (map-get? delegations delegator)
+)
+
+(define-read-only (get-delegation-history-entry (delegation-id uint))
+  (map-get? delegation-history delegation-id)
+)
+
+(define-read-only (get-delegation-counter)
+  (var-get delegation-counter)
+)
+
+(define-private (calculate-delegated-power (delegators (list 20 principal)) (delegate principal))
+  (fold sum-delegator-power delegators u0)
+)
+
+(define-private (sum-delegator-power (delegator principal) (total uint))
+  (match (map-get? delegations delegator)
+    delegation
+      (if (and (get is-active delegation) (is-eq (get delegate-to delegation) tx-sender))
+        (match (map-get? donors delegator)
+          donor-data
+            (let (
+              (base-power (get donation-amount donor-data))
+              (tier (get current-milestone-tier donor-data))
+              (multiplier (get-voting-multiplier tier))
+            )
+              (+ total (/ (* base-power multiplier) u100))
+            )
+          total
+        )
+        total
+      )
+    total
+  )
+)
+
+(define-read-only (get-delegation-stats)
+  {
+    total-delegations: (var-get delegation-counter),
+    active-delegations: (count-active-delegations)
+  }
+)
+
+(define-private (count-active-delegations)
+  (fold count-delegation-entry (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10 u11 u12 u13 u14 u15 u16 u17 u18 u19 u20) u0)
+)
+
+(define-private (count-delegation-entry (id uint) (total uint))
+  (if (<= id (var-get delegation-counter))
+    (match (map-get? delegation-history id)
+      history-entry
+        (if (get is-active history-entry)
+          (+ total u1)
+          total
+        )
+      total
+    )
+    total
+  )
+)
+
