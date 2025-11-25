@@ -192,6 +192,31 @@
   )
 )
 
+(define-public (public-donate (amount uint) (memo (optional (string-ascii 50))))
+  (let (
+    (donation-id (+ (var-get donation-counter) u1))
+  )
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+    (map-set donation-history donation-id {
+      donor: tx-sender,
+      amount: amount,
+      timestamp: burn-block-height,
+      block-height: stacks-block-height
+    })
+    (var-set donation-counter donation-id)
+    (var-set total-treasury (+ (var-get total-treasury) amount))
+    (print {
+      event: "public-donation",
+      donor: tx-sender,
+      amount: amount,
+      memo: memo,
+      donation-id: donation-id
+    })
+    (ok donation-id)
+  )
+)
+
 (define-public (create-proposal (title (string-ascii 100)) (description (string-ascii 500)) (amount uint) (recipient principal))
   (let (
     (proposal-id (+ (var-get proposal-counter) u1))
